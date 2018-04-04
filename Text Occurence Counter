@@ -1,0 +1,127 @@
+from datetime import datetime
+
+import spacy
+from spacy.lang.en import English
+
+import pymongo
+from bson.objectid import ObjectId
+
+import pandas as pd
+import os.path
+import logging
+import sys
+#import mongolog.dblogger as log
+
+class CountOccurrancesOfText(object):
+    def __init__(self,
+                 searchfor,
+                 host='localhost',
+                 port=27017,
+                 db='python_import',
+                 collection='earnings_call_S&P500'):                # earnings_transcript, earnings_call_Dow30_Broad,
+        self.searchfor = searchfor
+        print("Looking for phrase: ", self.searchfor)
+        self.client = pymongo.MongoClient(host=host, port=port)
+        self.db = self.client[db]
+        self.collection = self.db[collection]
+        self.nlp = English()
+        self.initialize_dictionaries(self.searchfor)
+
+        # self.collection.update({}, {'$unset': {'rawText_lemmaSize': 1}}, multi=True);
+
+        # self.collection.update({}, {'$unset': {'rawText_tokenSize': 1}}, multi=True);
+        # self.collection.update({}, {'$unset': {'rawText_NumberOfPhraseOccurrance': 1}}, multi=True);
+        # self.collection.update({}, {'$unset': {'QAText_tokenSize': 1}}, multi=True);
+        # self.collection.update({}, {'$unset': {'QAtext_NumberOfPhraseOccurrance': 1}}, multi=True);
+        # self.collection.update({}, {'$unset': {'date_number': 1}}, multi=True);
+        # self.collection.update({}, {'$unset': {'time_number': 1}}, multi=True);
+
+        print("Initialization complete.")
+
+    def initialize_dictionaries(self, phrase):
+        self.phrase = phrase
+
+    def tokenize_simple(self, doc):
+        return [tok.orth_.lower() for tok in doc]
+
+    def tokenize_lemma(self, doc):
+        return [tok.lemma_ for tok in doc if
+                tok.pos_ in ["NOUN", "PROPN", "ADJ", "VERB"] and not tok.lemma_ == '-PRON-']
+
+    def get_words(self, text):
+        if text:
+            doc = self.nlp(text)
+            return self.tokenize_simple(doc), self.tokenize_lemma(doc)
+        else:
+            return [], []
+
+    def count_value_if_present(self, phrase, words):
+
+        iCounter = 0
+        for word in words:
+            if word == self.phrase.lower():
+                iCounter += 1
+        return iCounter, len(words)
+
+    def process_words_with_phrase_to_lookup(self, words, phrase):
+        occurance, length = self.count_value_if_present(self.phrase, words)
+        return {'Phrase_occurrance': int(occurance), 'Length_of_transcript': int(length)}
+
+    def process(self, transcript, column):
+        tokens, lemmas = self.get_words(transcript[column])
+        token_figures = self.process_words_with_phrase_to_lookup(tokens, self.phrase)['Phrase_occurrance']
+        lemma_figures = self.process_words_with_phrase_to_lookup(lemmas, self.phrase)['Phrase_occurrance']
+
+
+        return len(tokens), token_figures, len(lemmas), lemma_figures
+
+    def process_transcripts_and_save(self):
+        transcripts = self.collection.find({"rawText_tokenSize": {'$exists': False}},
+                                           no_cursor_timeout=True).batch_size(30)
+        for transcript in transcripts:
+            tokenSize, phraseInTokens, lemmaSize, phraseInLemmas = \
+                self.process(transcript, 'rawText')
+            try:
+                if transcript["qAndAText"]:
+                    tokenSize1, phraseInTokens1, lemmaSize1, phraseInLemmas1 = \
+                    self.process(transcript, "qAndAText")
+                else:
+                    tokenSize1, phraseInTokens1, lemmaSize1, phraseInLemmas1 = 0, 0, 0, 0
+            except KeyError:
+                tokenSize1, phraseInTokens1, lemmaSize1, phraseInLemmas1 = 0,0,0,0
+
+            if isinstance(transcript['publishDate'], str):
+                dt = datetime.strptime(transcript['publishDate'], '%Y-%m-%dT%H:%M:%SZ')
+            else:
+                dt = transcript['publishDate']
+            date_number = (dt.year - 1900) * 10000 + (dt.month) * 100 + (dt.day)
+            time_number = (dt.hour) * 10000 + (dt.minute) * 100 + (dt.second)
+
+            self.collection.update_one(
+                {'_id': transcript['_id']},
+                {'$set': {'rawText_tokenSize': tokenSize,
+                          'rawText_NumberOfPhraseOccurrance': phraseInTokens,
+                          #'rawText_lemmaSize': lemmaSize,
+                          #'rawText_lemma_NumberOfPhraseOccurrance': phraseInLemmas,
+                          'QAText_tokenSize': tokenSize1,
+                          'QAtext_NumberOfPhraseOccurrance': phraseInTokens1,
+                          #'QAText_lemmaSize': lemmaSize1,
+                          #'QAtext_lemma_NumberOfPhraseOccurrance': phraseInLemmas1,
+                          'date_number': date_number,
+                          'time_number': time_number,
+                          }})
+        print("Database updated.")
+        
+    def process_transcripts_and_save_FOR_TEST(self):
+        transcripts = self.collection.find({"tokenSize": {'$exists': False}},
+                                        no_cursor_timeout=True).batch_size(30)
+        temp_data = self.collection.find_one({"_id": ObjectId("5937dccd082789410c746a38")})
+        tokenSize, phraseInTokens, lemmaSize, phraseInLemmas = self.process(temp_data)
+        print(tokenSize, phraseInTokens, lemmaSize, phraseInLemmas, end="\n")
+
+
+calc = CountOccurrancesOfText('amazon')
+calc.process_transcripts_and_save()
+
+
+
